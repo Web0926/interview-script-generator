@@ -15,6 +15,7 @@ const ERROR_MESSAGES = {
   AI_CONFIG_MISSING: '服务器还没有配置 OpenRouter API Key。',
   ANALYZE_FAILED: '简历分析失败，请稍后重试。',
   GENERATE_FAILED: '逐字稿生成失败，请稍后重试。',
+  AI_UPSTREAM_TIMEOUT: 'AI 分析超时，请换一份更清晰或更小的简历后重试。',
   INVALID_CLIENT_ID: '当前设备标识无效，请刷新页面后重试。',
   INTERNAL_ERROR: '服务器暂时开小差了，请稍后再试。',
 }

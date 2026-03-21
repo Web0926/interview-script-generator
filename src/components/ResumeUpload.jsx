@@ -10,6 +10,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 const ACCEPTED = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp']
 const ACCEPTED_EXT = '.pdf,.png,.jpg,.jpeg,.webp'
+const MAX_IMAGE_WIDTH = 1600
+const MAX_IMAGE_HEIGHT = 6000
+const PDF_RENDER_SCALE = 1.4
+const EXPORT_QUALITY = 0.82
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -20,19 +24,63 @@ function fileToBase64(file) {
   })
 }
 
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('图片读取失败'))
+    image.src = src
+  })
+}
+
+function normalizeCanvasSize(width, height) {
+  const widthRatio = MAX_IMAGE_WIDTH / width
+  const heightRatio = MAX_IMAGE_HEIGHT / height
+  const ratio = Math.min(1, widthRatio, heightRatio)
+
+  return {
+    width: Math.max(1, Math.round(width * ratio)),
+    height: Math.max(1, Math.round(height * ratio)),
+  }
+}
+
+function exportCanvas(canvas) {
+  const { width, height } = normalizeCanvasSize(canvas.width, canvas.height)
+  const target = document.createElement('canvas')
+  target.width = width
+  target.height = height
+
+  const ctx = target.getContext('2d')
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, width, height)
+  ctx.drawImage(canvas, 0, 0, width, height)
+
+  const dataUrl = target.toDataURL('image/jpeg', EXPORT_QUALITY)
+  return { base64: dataUrl.split(',')[1], mediaType: 'image/jpeg' }
+}
+
+async function imageFileToOptimizedBase64(file) {
+  const rawBase64 = await fileToBase64(file)
+  const image = await loadImage(`data:${file.type};base64,${rawBase64}`)
+  const canvas = document.createElement('canvas')
+  canvas.width = image.width
+  canvas.height = image.height
+  canvas.getContext('2d').drawImage(image, 0, 0)
+  return exportCanvas(canvas)
+}
+
 // 把 PDF 所有页渲染成一张长图，返回 { base64, mediaType }
 async function pdfToImage(file) {
   const arrayBuffer = await file.arrayBuffer()
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
 
-  const SCALE = 2
   const canvases = []
   let totalHeight = 0
   let maxWidth = 0
 
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i)
-    const viewport = page.getViewport({ scale: SCALE })
+    const viewport = page.getViewport({ scale: PDF_RENDER_SCALE })
     const canvas = document.createElement('canvas')
     canvas.width = viewport.width
     canvas.height = viewport.height
@@ -55,8 +103,7 @@ async function pdfToImage(file) {
     y += c.height
   }
 
-  const dataUrl = merged.toDataURL('image/png')
-  return { base64: dataUrl.split(',')[1], mediaType: 'image/png' }
+  return exportCanvas(merged)
 }
 
 export default function ResumeUpload({ onStart }) {
@@ -94,8 +141,7 @@ export default function ResumeUpload({ onStart }) {
       if (file.type === 'application/pdf') {
         ;({ base64, mediaType } = await pdfToImage(file))
       } else {
-        base64 = await fileToBase64(file)
-        mediaType = file.type
+        ;({ base64, mediaType } = await imageFileToOptimizedBase64(file))
       }
       onStart({ base64, mediaType, fileName: file.name })
     } catch (e) {
