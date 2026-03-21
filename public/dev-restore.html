@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dev Restore</title>
+  </head>
+  <body>
+    <script>
+      const params = new URLSearchParams(window.location.search)
+      const sessionToken = params.get('sessionToken')
+      const clientId = params.get('clientId')
+
+      if (sessionToken) {
+        localStorage.setItem('interview-script-session-token', sessionToken)
+      }
+
+      if (clientId) {
+        localStorage.setItem('interview-script-client-id', clientId)
+      }
+
+      window.location.replace('/')
+    </script>
+  </body>
+</html>

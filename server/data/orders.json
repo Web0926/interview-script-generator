@@ -1,0 +1,18 @@
+{
+  "nextId": 2,
+  "orders": [
+    {
+      "id": 1,
+      "platform": "xiaohongshu",
+      "orderNo": "XHS202603180001",
+      "phoneLast4": "1234",
+      "amountCents": null,
+      "orderStatus": "used",
+      "paidAt": "2026-03-18T09:40:17.321Z",
+      "redeemedAt": "2026-03-18T09:42:14.541Z",
+      "usedAt": "2026-03-18T10:37:53.735Z",
+      "createdAt": "2026-03-18T09:40:17.321Z",
+      "updatedAt": "2026-03-18T10:37:53.735Z"
+    }
+  ]
+}
