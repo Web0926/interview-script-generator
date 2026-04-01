@@ -114,6 +114,42 @@ function summarizeResumeInput(resumeInput) {
   return { kind: 'unknown' }
 }
 
+function normalizeIncomingResumePayload(body) {
+  const payload = body && typeof body === 'object' ? body : {}
+
+  if (payload.resumeInput && typeof payload.resumeInput === 'object') {
+    return {
+      resumeInput: payload.resumeInput,
+      requestFormat: 'resume_input',
+    }
+  }
+
+  const base64 = String(payload.base64 || '').trim()
+  const mediaType = String(payload.mediaType || '').trim()
+  if (base64 && mediaType) {
+    return {
+      requestFormat: 'legacy_base64',
+      resumeInput: {
+        kind: 'images',
+        source: 'legacy_request',
+        fileName: '',
+        pageCount: 1,
+        pages: [
+          {
+            base64,
+            mediaType,
+          },
+        ],
+      },
+    }
+  }
+
+  return {
+    requestFormat: 'unknown',
+    resumeInput: null,
+  }
+}
+
 async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/health') {
     return sendJson(res, 200, { ok: true })
@@ -151,18 +187,20 @@ async function handleApi(req, res, url) {
     const body = await readJsonBody(req)
     const sessionToken = getSessionToken(req)
     const clientId = getClientId(req)
-    const resumeSummary = summarizeResumeInput(body.resumeInput)
+    const normalizedPayload = normalizeIncomingResumePayload(body)
+    const resumeSummary = summarizeResumeInput(normalizedPayload.resumeInput)
 
     console.log('[resume.analyze] start', JSON.stringify({
       sessionTail: sessionToken.slice(-6),
       clientTail: String(clientId || '').slice(-6),
+      requestFormat: normalizedPayload.requestFormat,
       ...resumeSummary,
     }))
 
     const prepareResult = await prepareAnalysis({
       sessionToken,
       clientId,
-      resumeInput: body.resumeInput,
+      resumeInput: normalizedPayload.resumeInput,
     })
 
     if (!prepareResult.ok) {
@@ -170,10 +208,11 @@ async function handleApi(req, res, url) {
     }
 
     try {
-      const analysisResult = await analyzeResume(body.resumeInput)
+      const analysisResult = await analyzeResume(normalizedPayload.resumeInput)
       const saved = await saveAnalysisResult({ sessionToken, clientId, analysisResult })
       console.log('[resume.analyze] success', JSON.stringify({
         sessionTail: sessionToken.slice(-6),
+        requestFormat: normalizedPayload.requestFormat,
         questionCount: Array.isArray(analysisResult?.questions) ? analysisResult.questions.length : 0,
       }))
       return sendJson(res, 200, {
@@ -186,6 +225,7 @@ async function handleApi(req, res, url) {
         sessionTail: sessionToken.slice(-6),
         code: error.code || 'ANALYZE_FAILED',
         message: error.message,
+        requestFormat: normalizedPayload.requestFormat,
         ...resumeSummary,
       }))
       await saveAnalysisFailure({
@@ -290,8 +330,15 @@ async function serveStatic(req, res, url) {
   try {
     const content = await fsp.readFile(filePath)
     const ext = path.extname(filePath).toLowerCase()
+    const isHtml = ext === '.html'
+    const isAsset = filePath.includes(`${path.sep}assets${path.sep}`)
     res.writeHead(200, {
       'content-type': MIME_TYPES[ext] ?? 'application/octet-stream',
+      'cache-control': isHtml
+        ? 'no-cache'
+        : isAsset
+          ? 'public, max-age=31536000, immutable'
+          : 'public, max-age=300',
     })
     res.end(content)
   } catch {
