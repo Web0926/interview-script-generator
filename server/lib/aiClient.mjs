@@ -4,8 +4,8 @@ import { getEnv } from './env.mjs'
 
 const API_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const MODEL = getEnv('OPENROUTER_MODEL', 'anthropic/claude-opus-4.6')
-const DEFAULT_MAX_TOKENS = Number(getEnv('OPENROUTER_MAX_TOKENS', '5000'))
-const ANALYZE_MAX_TOKENS = Number(getEnv('OPENROUTER_ANALYZE_MAX_TOKENS', '1800'))
+const DEFAULT_MAX_TOKENS = Number(getEnv('OPENROUTER_MAX_TOKENS', '8000'))
+const ANALYZE_MAX_TOKENS = Number(getEnv('OPENROUTER_ANALYZE_MAX_TOKENS', '4000'))
 const GENERATE_MAX_TOKENS = Number(getEnv('OPENROUTER_GENERATE_MAX_TOKENS', String(DEFAULT_MAX_TOKENS)))
 const REQUEST_TIMEOUT_MS = Number(getEnv('OPENROUTER_TIMEOUT_MS', '45000'))
 
@@ -16,6 +16,68 @@ function normalizeJSONText(raw) {
     .replace(/[\u201c\u201d]/g, '"')
     .replace(/[\u2018\u2019]/g, "'")
     .trim()
+}
+
+function escapeNewlinesInStrings(text) {
+  let result = ''
+  let inString = false
+  let escape = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (escape) {
+      result += ch
+      escape = false
+      continue
+    }
+    if (ch === '\\' && inString) {
+      result += ch
+      escape = true
+      continue
+    }
+    if (ch === '"') {
+      inString = !inString
+      result += ch
+      continue
+    }
+    if (inString && (ch === '\n' || ch === '\r')) {
+      result += ch === '\n' ? '\\n' : '\\r'
+      continue
+    }
+    if (inString && ch === '\t') {
+      result += '\\t'
+      continue
+    }
+    result += ch
+  }
+  return result
+}
+
+function tryCompleteTruncatedJSON(text) {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return text
+
+  let depth = 0
+  let inString = false
+  let escape = false
+  const stack = []
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (escape) { escape = false; continue }
+    if (ch === '\\' && inString) { escape = true; continue }
+    if (ch === '"') { inString = !inString; continue }
+    if (inString) continue
+    if (ch === '{') stack.push('}')
+    else if (ch === '[') stack.push(']')
+    else if (ch === '}' || ch === ']') stack.pop()
+  }
+
+  if (stack.length === 0) return trimmed
+
+  let completed = trimmed
+  if (inString) completed += '"'
+  while (stack.length > 0) completed += stack.pop()
+  return completed
 }
 
 function tryParseJSON(raw) {
@@ -40,6 +102,34 @@ function tryParseJSON(raw) {
       return JSON.parse(candidate)
     } catch (error) {
       lastError = error
+    }
+  }
+
+  // Second pass: escape literal newlines inside JSON strings
+  const escaped = escapeNewlinesInStrings(cleaned)
+  const escapedCandidates = [escaped]
+  const eObjStart = escaped.indexOf('{')
+  const eObjEnd = escaped.lastIndexOf('}')
+  if (eObjStart !== -1 && eObjEnd !== -1 && eObjEnd > eObjStart) {
+    escapedCandidates.push(escaped.slice(eObjStart, eObjEnd + 1))
+  }
+  for (const candidate of escapedCandidates) {
+    try {
+      return JSON.parse(candidate)
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  // Third pass: try completing truncated JSON
+  for (const candidate of escapedCandidates) {
+    const completed = tryCompleteTruncatedJSON(candidate)
+    if (completed !== candidate) {
+      try {
+        return JSON.parse(completed)
+      } catch (error) {
+        lastError = error
+      }
     }
   }
 
@@ -229,14 +319,18 @@ export async function generateScripts(resumeInput, questions, answers) {
     .map((question, index) => `Q${question.id}【${question.dimension}】：${question.question}\n回答：${answers[index]?.answer || '（未回答）'}`)
     .join('\n\n')
 
-  const raw = await callModel(
-    SYSTEM_PROMPT_GENERATE,
-    buildResumeContent(
-      resumeInput,
-      `以下是候选人对5轮追问的回答：\n\n${qaText}\n\n请基于简历和以上回答，生成自我介绍和项目介绍的逐字稿。`
-    ),
-    { maxTokens: GENERATE_MAX_TOKENS }
+  const userContent = buildResumeContent(
+    resumeInput,
+    `以下是候选人对${questions.length}轮追问的回答：\n\n${qaText}\n\n请基于简历和以上回答，生成自我介绍和项目介绍的逐字稿。`
   )
 
-  return parseJSONWithRecovery(raw, '逐字稿生成')
+  const raw = await callModel(SYSTEM_PROMPT_GENERATE, userContent, { maxTokens: GENERATE_MAX_TOKENS })
+
+  try {
+    return parseJSONWithRecovery(raw, '逐字稿生成')
+  } catch (firstError) {
+    // Retry once with a fresh model call
+    const retryRaw = await callModel(SYSTEM_PROMPT_GENERATE, userContent, { maxTokens: GENERATE_MAX_TOKENS })
+    return parseJSONWithRecovery(retryRaw, '逐字稿生成')
+  }
 }

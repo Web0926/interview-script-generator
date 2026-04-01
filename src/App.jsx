@@ -252,6 +252,9 @@ export default function App() {
         clientId: state.clientId,
         file,
       })
+      if (!result?.analysisResult?.questions?.length) {
+        throw new Error('简历分析返回数据不完整，请重试。')
+      }
       setState((s) => s.step === 'analyzing'
         ? { ...s, analysisResult: result.analysisResult, step: 'qa' }
         : s)
@@ -400,8 +403,11 @@ export default function App() {
             submessage={analyzingSubmessage}
           />
         )}
-        {step === 'qa' && analysisResult && (
+        {step === 'qa' && analysisResult && analysisResult.questions?.length > 0 && (
           <QASession analysisResult={analysisResult} onComplete={handleQAComplete} />
+        )}
+        {step === 'qa' && (!analysisResult || !analysisResult.questions?.length) && (
+          <ResumeUpload onStart={handleUploadStart} />
         )}
         {step === 'generating' && (
           <LoadingState

@@ -84,6 +84,10 @@ async function request(path, { method = 'GET', body, sessionToken, clientId, tim
     throw new Error(getErrorMessage(payload?.code, payload?.error))
   }
 
+  if (payload === null) {
+    throw new Error('服务器返回数据异常，请稍后重试。')
+  }
+
   return payload
 }
 

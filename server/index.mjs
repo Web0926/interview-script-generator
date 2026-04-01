@@ -257,6 +257,17 @@ async function handleApi(req, res, url) {
     try {
       const analysisResult = await analyzeResume(normalizedPayload.resumeInput)
       const saved = await saveAnalysisResult({ sessionToken, clientId, analysisResult })
+      if (!saved.ok) {
+        console.error('[resume.analyze] save failed', JSON.stringify({
+          sessionTail: sessionToken.slice(-6),
+          code: saved.code,
+        }))
+        return sendJson(res, 500, {
+          ok: false,
+          code: saved.code || 'INTERNAL_ERROR',
+          error: '保存分析结果失败，请重试。',
+        })
+      }
       console.log('[resume.analyze] success', JSON.stringify({
         sessionTail: sessionToken.slice(-6),
         requestFormat: normalizedPayload.requestFormat,
