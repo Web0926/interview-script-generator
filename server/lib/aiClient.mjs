@@ -84,6 +84,76 @@ function buildFileContent(base64, mediaType) {
   }
 }
 
+function normalizeResumeInput(resumeInput) {
+  if (!resumeInput || typeof resumeInput !== 'object') {
+    return null
+  }
+
+  if (resumeInput.kind === 'text' && resumeInput.text) {
+    return {
+      kind: 'text',
+      source: resumeInput.source || 'pdf_text',
+      text: String(resumeInput.text),
+      truncated: Boolean(resumeInput.truncated),
+      originalTextLength: Number(resumeInput.originalTextLength || String(resumeInput.text).length),
+      fileName: resumeInput.fileName || '',
+      pageCount: Number(resumeInput.pageCount || 0),
+    }
+  }
+
+  if (resumeInput.kind === 'images' && Array.isArray(resumeInput.pages) && resumeInput.pages.length) {
+    return {
+      kind: 'images',
+      source: resumeInput.source || 'image',
+      pages: resumeInput.pages
+        .map((page) => ({
+          base64: String(page?.base64 || ''),
+          mediaType: String(page?.mediaType || ''),
+        }))
+        .filter((page) => page.base64 && page.mediaType),
+      fileName: resumeInput.fileName || '',
+      pageCount: Number(resumeInput.pageCount || resumeInput.pages.length),
+    }
+  }
+
+  return null
+}
+
+function buildResumeContent(resumeInput, promptText) {
+  const normalizedResumeInput = normalizeResumeInput(resumeInput)
+  if (!normalizedResumeInput) {
+    const error = new Error('没有从简历里识别到可分析的内容')
+    error.code = 'RESUME_CONTENT_EMPTY'
+    throw error
+  }
+
+  if (normalizedResumeInput.kind === 'text') {
+    const fileMeta = [
+      normalizedResumeInput.fileName ? `文件名：${normalizedResumeInput.fileName}` : '',
+      normalizedResumeInput.pageCount ? `页数：${normalizedResumeInput.pageCount}` : '',
+      `来源：${normalizedResumeInput.source}`,
+    ].filter(Boolean).join('；')
+    const truncateNote = normalizedResumeInput.truncated
+      ? `\n注意：提取文本过长，已从 ${normalizedResumeInput.originalTextLength} 字截取前 ${normalizedResumeInput.text.length} 字用于分析。`
+      : ''
+
+    return [
+      {
+        type: 'text',
+        text: `${promptText}\n\n以下是从简历中提取出的文本内容（可能有轻微排版丢失）：\n${fileMeta}${truncateNote}\n\n${normalizedResumeInput.text}`,
+      },
+    ]
+  }
+
+  return [
+    ...normalizedResumeInput.pages.map((page) => buildFileContent(page.base64, page.mediaType)),
+    {
+      type: 'text',
+      text: `${promptText}\n\n补充信息：文件名：${normalizedResumeInput.fileName || '未命名'}；页数：${normalizedResumeInput.pageCount || normalizedResumeInput.pages.length}；来源：${normalizedResumeInput.source}`,
+    },
+  ]
+}
+
 async function callModel(system, userContent, { maxTokens = DEFAULT_MAX_TOKENS } = {}) {
   const apiKey = getEnv('OPENROUTER_API_KEY') || getEnv('VITE_OPENROUTER_API_KEY')
   if (!apiKey) {
@@ -119,14 +189,20 @@ async function callModel(system, userContent, { maxTokens = DEFAULT_MAX_TOKENS }
       timeoutError.code = 'AI_UPSTREAM_TIMEOUT'
       throw timeoutError
     }
-    throw error
+    const upstreamError = new Error('AI 服务暂时不可达，请稍后重试')
+    upstreamError.code = 'AI_UPSTREAM_UNREACHABLE'
+    upstreamError.cause = error
+    throw upstreamError
   } finally {
     clearTimeout(timeout)
   }
 
   if (!response.ok) {
     const details = await response.text()
-    throw new Error(`API 请求失败 (${response.status}): ${details}`)
+    const upstreamError = new Error(`AI 服务响应异常 (${response.status})`)
+    upstreamError.code = 'AI_UPSTREAM_ERROR'
+    upstreamError.details = details
+    throw upstreamError
   }
 
   const data = await response.json()
@@ -138,27 +214,29 @@ async function callModel(system, userContent, { maxTokens = DEFAULT_MAX_TOKENS }
   return content
 }
 
-export async function analyzeResume(base64, mediaType) {
-  const raw = await callModel(SYSTEM_PROMPT_ANALYZE, [
-    buildFileContent(base64, mediaType),
-    { type: 'text', text: '请分析这份简历，并按照要求生成5个追问问题。' },
-  ], { maxTokens: ANALYZE_MAX_TOKENS })
+export async function analyzeResume(resumeInput) {
+  const raw = await callModel(
+    SYSTEM_PROMPT_ANALYZE,
+    buildResumeContent(resumeInput, '请分析这份简历，并按照要求生成5个追问问题。'),
+    { maxTokens: ANALYZE_MAX_TOKENS }
+  )
 
   return parseJSONWithRecovery(raw, '简历分析')
 }
 
-export async function generateScripts(base64, mediaType, questions, answers) {
+export async function generateScripts(resumeInput, questions, answers) {
   const qaText = questions
     .map((question, index) => `Q${question.id}【${question.dimension}】：${question.question}\n回答：${answers[index]?.answer || '（未回答）'}`)
     .join('\n\n')
 
-  const raw = await callModel(SYSTEM_PROMPT_GENERATE, [
-    buildFileContent(base64, mediaType),
-    {
-      type: 'text',
-      text: `以下是候选人对5轮追问的回答：\n\n${qaText}\n\n请基于简历和以上回答，生成自我介绍和项目介绍的逐字稿。`,
-    },
-  ], { maxTokens: GENERATE_MAX_TOKENS })
+  const raw = await callModel(
+    SYSTEM_PROMPT_GENERATE,
+    buildResumeContent(
+      resumeInput,
+      `以下是候选人对5轮追问的回答：\n\n${qaText}\n\n请基于简历和以上回答，生成自我介绍和项目介绍的逐字稿。`
+    ),
+    { maxTokens: GENERATE_MAX_TOKENS }
+  )
 
   return parseJSONWithRecovery(raw, '逐字稿生成')
 }

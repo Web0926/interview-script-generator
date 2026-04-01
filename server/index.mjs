@@ -18,6 +18,7 @@ import { getEnv, getRootDir } from './lib/env.mjs'
 const rootDir = getRootDir()
 const distDir = path.join(rootDir, 'dist')
 const port = Number(getEnv('PORT', '3001'))
+const MAX_JSON_BODY_BYTES = 12 * 1024 * 1024
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -46,9 +47,10 @@ async function readJsonBody(req) {
 
   for await (const chunk of req) {
     total += chunk.length
-    if (total > 35 * 1024 * 1024) {
+    if (total > MAX_JSON_BODY_BYTES) {
       const error = new Error('请求体过大')
       error.statusCode = 413
+      error.code = 'REQUEST_TOO_LARGE'
       throw error
     }
     chunks.push(chunk)
@@ -63,6 +65,7 @@ async function readJsonBody(req) {
   } catch {
     const error = new Error('请求体不是合法 JSON')
     error.statusCode = 400
+    error.code = 'INVALID_JSON'
     throw error
   }
 }
@@ -75,6 +78,40 @@ function getSessionToken(req) {
   const value = req.headers.authorization
   if (!value?.startsWith('Bearer ')) return ''
   return value.slice('Bearer '.length).trim()
+}
+
+function summarizeResumeInput(resumeInput) {
+  if (!resumeInput || typeof resumeInput !== 'object') {
+    return { kind: 'unknown' }
+  }
+
+  if (resumeInput.kind === 'text') {
+    const text = String(resumeInput.text || '')
+    return {
+      kind: 'text',
+      source: String(resumeInput.source || 'pdf_text'),
+      fileName: String(resumeInput.fileName || ''),
+      pageCount: Number(resumeInput.pageCount || 0),
+      textLength: text.length,
+      truncated: Boolean(resumeInput.truncated),
+    }
+  }
+
+  if (resumeInput.kind === 'images') {
+    const pages = Array.isArray(resumeInput.pages) ? resumeInput.pages : []
+    const totalBase64Bytes = pages.reduce((sum, page) => sum + String(page?.base64 || '').length, 0)
+
+    return {
+      kind: 'images',
+      source: String(resumeInput.source || 'image'),
+      fileName: String(resumeInput.fileName || ''),
+      pageCount: Number(resumeInput.pageCount || pages.length),
+      imageCount: pages.length,
+      totalBase64Bytes,
+    }
+  }
+
+  return { kind: 'unknown' }
 }
 
 async function handleApi(req, res, url) {
@@ -114,12 +151,18 @@ async function handleApi(req, res, url) {
     const body = await readJsonBody(req)
     const sessionToken = getSessionToken(req)
     const clientId = getClientId(req)
+    const resumeSummary = summarizeResumeInput(body.resumeInput)
+
+    console.log('[resume.analyze] start', JSON.stringify({
+      sessionTail: sessionToken.slice(-6),
+      clientTail: String(clientId || '').slice(-6),
+      ...resumeSummary,
+    }))
 
     const prepareResult = await prepareAnalysis({
       sessionToken,
       clientId,
-      resumeBase64: body.base64,
-      resumeMediaType: body.mediaType,
+      resumeInput: body.resumeInput,
     })
 
     if (!prepareResult.ok) {
@@ -127,14 +170,24 @@ async function handleApi(req, res, url) {
     }
 
     try {
-      const analysisResult = await analyzeResume(body.base64, body.mediaType)
+      const analysisResult = await analyzeResume(body.resumeInput)
       const saved = await saveAnalysisResult({ sessionToken, clientId, analysisResult })
+      console.log('[resume.analyze] success', JSON.stringify({
+        sessionTail: sessionToken.slice(-6),
+        questionCount: Array.isArray(analysisResult?.questions) ? analysisResult.questions.length : 0,
+      }))
       return sendJson(res, 200, {
         ok: true,
         analysisResult,
         session: saved.session,
       })
     } catch (error) {
+      console.error('[resume.analyze] failed', JSON.stringify({
+        sessionTail: sessionToken.slice(-6),
+        code: error.code || 'ANALYZE_FAILED',
+        message: error.message,
+        ...resumeSummary,
+      }))
       await saveAnalysisFailure({
         sessionToken,
         clientId,
@@ -159,21 +212,37 @@ async function handleApi(req, res, url) {
       return sendJson(res, 400, beginResult)
     }
 
+    console.log('[scripts.generate] start', JSON.stringify({
+      sessionTail: sessionToken.slice(-6),
+      questionCount: Array.isArray(beginResult.payload.questions) ? beginResult.payload.questions.length : 0,
+      answerCount: Array.isArray(body.answers) ? body.answers.length : 0,
+      ...summarizeResumeInput(beginResult.payload.resumeInput),
+    }))
+
     try {
       const scriptsResult = await generateScripts(
-        beginResult.payload.resumeBase64,
-        beginResult.payload.resumeMediaType,
+        beginResult.payload.resumeInput,
         beginResult.payload.questions,
         body.answers ?? []
       )
 
       const completed = await completeGeneration({ sessionToken, clientId, scriptsResult })
+      console.log('[scripts.generate] success', JSON.stringify({
+        sessionTail: sessionToken.slice(-6),
+        hasIntro: Boolean(scriptsResult?.selfIntro),
+        projectCount: Array.isArray(scriptsResult?.projects) ? scriptsResult.projects.length : 0,
+      }))
       return sendJson(res, 200, {
         ok: true,
         scripts: scriptsResult,
         session: completed.session,
       })
     } catch (error) {
+      console.error('[scripts.generate] failed', JSON.stringify({
+        sessionTail: sessionToken.slice(-6),
+        code: error.code || 'GENERATE_FAILED',
+        message: error.message,
+      }))
       await failGeneration({
         sessionToken,
         clientId,
@@ -244,7 +313,7 @@ const server = http.createServer(async (req, res) => {
     const statusCode = error.statusCode || 500
     sendJson(res, statusCode, {
       ok: false,
-      code: error.message === 'INVALID_CLIENT_ID' ? 'INVALID_CLIENT_ID' : 'INTERNAL_ERROR',
+      code: error.code || (error.message === 'INVALID_CLIENT_ID' ? 'INVALID_CLIENT_ID' : 'INTERNAL_ERROR'),
       error: error.message || '服务器异常',
     })
   }

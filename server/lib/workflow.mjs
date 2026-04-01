@@ -4,6 +4,11 @@ import { readState, withState } from './store.mjs'
 const ACTIVE_SESSION_STATUSES = new Set(['active', 'processing'])
 const TERMINAL_ORDER_STATUSES = new Set(['used', 'refunded', 'closed'])
 const SESSION_TTL_HOURS = 24
+const SUPPORTED_RESUME_INPUT_KINDS = new Set(['text', 'images'])
+const MAX_RESUME_TEXT_LENGTH = 24000
+const MAX_RESUME_IMAGE_PAGES = 3
+const MAX_RESUME_IMAGE_BASE64_LENGTH = 450 * 1024
+const MAX_RESUME_PAGE_COUNT = 8
 
 function nowIso() {
   return new Date().toISOString()
@@ -89,6 +94,122 @@ function assertClientId(clientId) {
   if (!clientId || String(clientId).trim().length < 12) {
     throw new Error('INVALID_CLIENT_ID')
   }
+}
+
+function createCodeError(code) {
+  const error = new Error(code)
+  error.code = code
+  return error
+}
+
+function normalizeTextPayload(text) {
+  const normalized = String(text || '').trim()
+  if (!normalized) {
+    return null
+  }
+
+  if (normalized.length <= MAX_RESUME_TEXT_LENGTH) {
+    return {
+      text: normalized,
+      truncated: false,
+      originalTextLength: normalized.length,
+    }
+  }
+
+  return {
+    text: normalized.slice(0, MAX_RESUME_TEXT_LENGTH).trimEnd(),
+    truncated: true,
+    originalTextLength: normalized.length,
+  }
+}
+
+function normalizeResumeInput(resumeInput) {
+  if (!resumeInput || typeof resumeInput !== 'object') {
+    return null
+  }
+
+  if (resumeInput.kind === 'text') {
+    const normalizedText = normalizeTextPayload(resumeInput.text)
+    if (!normalizedText) return null
+    const pageCount = Number(resumeInput.pageCount || 0)
+
+    if (pageCount > MAX_RESUME_PAGE_COUNT) {
+      throw createCodeError('PDF_PAGE_LIMIT_EXCEEDED')
+    }
+
+    return {
+      kind: 'text',
+      source: String(resumeInput.source || 'pdf_text'),
+      text: normalizedText.text,
+      truncated: normalizedText.truncated,
+      originalTextLength: normalizedText.originalTextLength,
+      fileName: String(resumeInput.fileName || ''),
+      pageCount,
+    }
+  }
+
+  if (resumeInput.kind === 'images') {
+    const pages = Array.isArray(resumeInput.pages)
+      ? resumeInput.pages
+          .map((page) => {
+            const base64 = String(page?.base64 || '').trim()
+            const mediaType = String(page?.mediaType || '').trim()
+
+            if (!base64 || !mediaType) {
+              return null
+            }
+
+            return { base64, mediaType }
+          })
+          .filter(Boolean)
+      : []
+
+    if (!pages.length) return null
+    if (pages.length > MAX_RESUME_IMAGE_PAGES) {
+      throw createCodeError('RESUME_IMAGE_PAGE_LIMIT')
+    }
+    if (pages.some((page) => page.base64.length > MAX_RESUME_IMAGE_BASE64_LENGTH)) {
+      throw createCodeError('RESUME_IMAGE_TOO_LARGE')
+    }
+
+    const pageCount = Number(resumeInput.pageCount || pages.length)
+    if (pageCount > MAX_RESUME_PAGE_COUNT) {
+      throw createCodeError('PDF_PAGE_LIMIT_EXCEEDED')
+    }
+
+    return {
+      kind: 'images',
+      source: String(resumeInput.source || 'image'),
+      pages,
+      fileName: String(resumeInput.fileName || ''),
+      pageCount,
+    }
+  }
+
+  return null
+}
+
+function getResumeInputFromSession(session) {
+  if (session.resumeInput && SUPPORTED_RESUME_INPUT_KINDS.has(session.resumeInput.kind)) {
+    return session.resumeInput
+  }
+
+  if (session.resumeBase64 && session.resumeMediaType) {
+    return {
+      kind: 'images',
+      source: 'legacy_image',
+      pages: [
+        {
+          base64: session.resumeBase64,
+          mediaType: session.resumeMediaType,
+        },
+      ],
+      fileName: '',
+      pageCount: 1,
+    }
+  }
+
+  return null
 }
 
 export async function upsertPaidOrder({ orderNo, phoneLast4, amountCents = null }) {
@@ -193,6 +314,7 @@ export async function redeemOrder({ orderNo, phoneLast4, clientId }) {
       sessionToken: crypto.randomUUID(),
       status: 'active',
       currentStep: 'upload',
+      resumeInput: null,
       resumeMediaType: null,
       resumeBase64: null,
       analysisResult: null,
@@ -264,9 +386,17 @@ export async function getCurrentSession({ sessionToken, clientId }) {
   })
 }
 
-export async function prepareAnalysis({ sessionToken, clientId, resumeBase64, resumeMediaType }) {
-  if (!resumeBase64 || !resumeMediaType) {
-    return { ok: false, code: 'ANALYZE_FAILED' }
+export async function prepareAnalysis({ sessionToken, clientId, resumeInput }) {
+  let normalizedResumeInput = null
+
+  try {
+    normalizedResumeInput = normalizeResumeInput(resumeInput)
+  } catch (error) {
+    return { ok: false, code: error.code || 'RESUME_CONTENT_EMPTY' }
+  }
+
+  if (!normalizedResumeInput) {
+    return { ok: false, code: 'RESUME_CONTENT_EMPTY' }
   }
 
   return withState((state) => {
@@ -276,8 +406,9 @@ export async function prepareAnalysis({ sessionToken, clientId, resumeBase64, re
     }
 
     const { session } = result
-    session.resumeBase64 = resumeBase64
-    session.resumeMediaType = resumeMediaType
+    session.resumeInput = normalizedResumeInput
+    session.resumeBase64 = null
+    session.resumeMediaType = null
     session.lastError = null
     updateCurrentStep(session, 'upload')
 
@@ -342,6 +473,11 @@ export async function beginGeneration({ sessionToken, clientId }) {
       return { ok: false, code: 'SESSION_BUSY' }
     }
 
+    const resumeInput = getResumeInputFromSession(session)
+    if (!resumeInput) {
+      return { ok: false, code: 'MISSING_ANALYSIS' }
+    }
+
     session.status = 'processing'
     session.lastError = null
     updateCurrentStep(session, 'generating')
@@ -351,8 +487,7 @@ export async function beginGeneration({ sessionToken, clientId }) {
     return {
       ok: true,
       payload: {
-        resumeBase64: session.resumeBase64,
-        resumeMediaType: session.resumeMediaType,
+        resumeInput,
         questions: session.analysisResult.questions,
       },
     }

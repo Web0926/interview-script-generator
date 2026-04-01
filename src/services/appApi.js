@@ -16,7 +16,18 @@ const ERROR_MESSAGES = {
   ANALYZE_FAILED: '简历分析失败，请稍后重试。',
   GENERATE_FAILED: '逐字稿生成失败，请稍后重试。',
   AI_UPSTREAM_TIMEOUT: 'AI 分析超时，请换一份更清晰或更小的简历后重试。',
+  AI_UPSTREAM_UNREACHABLE: 'AI 服务暂时不可达，请稍后重试。',
+  AI_UPSTREAM_ERROR: 'AI 服务响应异常，请稍后重试。',
   INVALID_CLIENT_ID: '当前设备标识无效，请刷新页面后重试。',
+  RESUME_CONTENT_EMPTY: '没有从简历里识别到可分析的内容，请换一份更清晰的简历后重试。',
+  PDF_PAGE_LIMIT_EXCEEDED: '简历页数过多，请上传更精简的简历版本。',
+  SCAN_PDF_PAGE_LIMIT: '扫描版 PDF 页数过多，请上传前 3 页或改用文字版 PDF。',
+  RESUME_IMAGE_PAGE_LIMIT: '当前最多支持 3 张页面图片，请上传更精简的内容。',
+  RESUME_IMAGE_TOO_LARGE: '扫描页图片过大，请换更精简的 PDF 或图片后重试。',
+  PDF_TOO_LARGE: 'PDF 文件不能超过 100MB。',
+  IMAGE_TOO_LARGE: '图片简历不能超过 30MB，请压缩后重试。',
+  REQUEST_TOO_LARGE: '上传内容过大，请换更精简的简历版本后重试。',
+  INVALID_JSON: '上传内容格式不正确，请刷新页面后重试。',
   INTERNAL_ERROR: '服务器暂时开小差了，请稍后再试。',
 }
 
@@ -97,12 +108,12 @@ export async function restoreSession({ sessionToken, clientId }) {
   })
 }
 
-export async function analyzeResume({ sessionToken, clientId, base64, mediaType }) {
+export async function analyzeResume({ sessionToken, clientId, resumeInput }) {
   return request('/api/resume/analyze', {
     method: 'POST',
     sessionToken,
     clientId,
-    body: { base64, mediaType },
+    body: { resumeInput },
   })
 }
 

@@ -21,11 +21,45 @@ const INITIAL_STATE = {
   step: 'restoring',
   clientId: null,
   sessionToken: null,
-  resumeBase64: null,
-  resumeMediaType: null,
   analysisResult: null,
+  analysisMeta: null,
   scripts: null,
   error: null,
+}
+
+function buildAnalysisMeta(resumeInput) {
+  if (!resumeInput || typeof resumeInput !== 'object') {
+    return null
+  }
+
+  return {
+    kind: resumeInput.kind,
+    source: resumeInput.source,
+    pageCount: Number(resumeInput.pageCount || 0),
+    truncated: Boolean(resumeInput.truncated),
+  }
+}
+
+function getAnalyzingSubmessage(analysisMeta) {
+  if (!analysisMeta) {
+    return '正在梳理最值得展开的经历，以及你可以讲清楚的问题、判断和结果'
+  }
+
+  if (analysisMeta.source === 'pdf_text') {
+    return analysisMeta.truncated
+      ? '已识别为文字版 PDF，正在直接分析提取出的关键信息；内容过长时会自动截取前面的重点部分，以保证稳定性。'
+      : '已识别为文字版 PDF，正在直接分析提取出的简历文本，这通常比整份转图片更稳也更快。'
+  }
+
+  if (analysisMeta.source === 'pdf_images') {
+    return `检测到扫描版 PDF，正在分析压缩后的前 ${analysisMeta.pageCount || 0} 页内容；扫描件会比文字版稍慢一些。`
+  }
+
+  if (analysisMeta.source === 'image') {
+    return '正在分析压缩后的图片版简历内容，并提炼最适合展开的经历。'
+  }
+
+  return '正在梳理最值得展开的经历，以及你可以讲清楚的问题、判断和结果'
 }
 
 export default function App() {
@@ -57,6 +91,7 @@ export default function App() {
           clientId,
           sessionToken,
           analysisResult: result.session.analysisResult,
+          analysisMeta: null,
           scripts: result.session.scriptsResult,
           step: result.session.currentStep || 'upload',
           error: result.session.lastError,
@@ -70,6 +105,7 @@ export default function App() {
           clientId,
           sessionToken: null,
           analysisResult: null,
+          analysisMeta: null,
           scripts: null,
           error: null,
           step: 'redeem',
@@ -97,6 +133,7 @@ export default function App() {
       ...s,
       sessionToken: result.sessionToken,
       analysisResult: result.session.analysisResult,
+      analysisMeta: null,
       scripts: result.session.scriptsResult,
       error: null,
       step: result.session.currentStep || 'upload',
@@ -104,14 +141,18 @@ export default function App() {
   }
 
   // Step 1 → 2: Upload resume and start analysis
-  async function handleUploadStart({ base64, mediaType }) {
-    setState((s) => ({ ...s, resumeBase64: base64, resumeMediaType: mediaType, step: 'analyzing', error: null }))
+  async function handleUploadStart({ resumeInput }) {
+    setState((s) => ({
+      ...s,
+      step: 'analyzing',
+      error: null,
+      analysisMeta: buildAnalysisMeta(resumeInput),
+    }))
     try {
       const result = await analyzeResume({
         sessionToken: state.sessionToken,
         clientId: state.clientId,
-        base64,
-        mediaType,
+        resumeInput,
       })
       setState((s) => ({ ...s, analysisResult: result.analysisResult, step: 'qa' }))
     } catch (e) {
@@ -144,6 +185,7 @@ export default function App() {
   }
 
   const { step, analysisResult, scripts, error } = state
+  const analyzingSubmessage = getAnalyzingSubmessage(state.analysisMeta)
 
   return (
     <div style={{ minHeight: '100vh', background: colors.bg }}>
@@ -217,7 +259,7 @@ export default function App() {
         {step === 'analyzing' && (
           <LoadingState
             message="AI 正在分析你的简历…"
-            submessage="正在梳理最值得展开的经历，以及你可以讲清楚的问题、判断和结果"
+            submessage={analyzingSubmessage}
           />
         )}
         {step === 'qa' && analysisResult && (
