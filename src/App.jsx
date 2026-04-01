@@ -56,7 +56,7 @@ function getAnalyzingSubmessage(analysisMeta) {
   }
 
   if (analysisMeta.source === 'raw_upload' && analysisMeta.mimeType === 'application/pdf') {
-    return '正在上传 PDF，并在服务器提取简历文本；这一步现在不再依赖浏览器本地解析，通常会更稳。'
+    return '正在上传 PDF，并提取简历文本，请稍候。'
   }
 
   if (analysisMeta.source === 'raw_upload') {
@@ -146,6 +146,78 @@ export default function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!state.sessionToken || !state.clientId) {
+      return
+    }
+
+    if (!['analyzing', 'generating'].includes(state.step)) {
+      return
+    }
+
+    let cancelled = false
+
+    async function syncSession() {
+      const recovered = await tryRecoverSession({
+        sessionToken: state.sessionToken,
+        clientId: state.clientId,
+      })
+
+      if (cancelled || !recovered?.session) {
+        return
+      }
+
+      const session = recovered.session
+
+      if (state.step === 'analyzing') {
+        if (session.analysisResult) {
+          setState((s) => ({
+            ...s,
+            analysisResult: session.analysisResult,
+            scripts: session.scriptsResult,
+            error: null,
+            step: session.currentStep || 'qa',
+          }))
+          return
+        }
+
+        if (session.currentStep === 'upload' && session.lastError) {
+          setState((s) => s.step === 'analyzing'
+            ? { ...s, step: 'upload', error: session.lastError }
+            : s)
+        }
+        return
+      }
+
+      if (state.step === 'generating') {
+        if (session.scriptsResult) {
+          setState((s) => ({
+            ...s,
+            analysisResult: session.analysisResult,
+            scripts: session.scriptsResult,
+            error: null,
+            step: session.currentStep || 'result',
+          }))
+          return
+        }
+
+        if (session.currentStep === 'qa' && session.lastError) {
+          setState((s) => s.step === 'generating'
+            ? { ...s, step: 'qa', error: session.lastError }
+            : s)
+        }
+      }
+    }
+
+    const timerId = window.setInterval(syncSession, 2500)
+    syncSession()
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timerId)
+    }
+  }, [state.step, state.sessionToken, state.clientId])
+
   async function handleRedeem({ orderNo, phoneLast4 }) {
     const result = await redeemOrder({
       orderNo,
@@ -180,7 +252,9 @@ export default function App() {
         clientId: state.clientId,
         file,
       })
-      setState((s) => ({ ...s, analysisResult: result.analysisResult, step: 'qa' }))
+      setState((s) => s.step === 'analyzing'
+        ? { ...s, analysisResult: result.analysisResult, step: 'qa' }
+        : s)
     } catch (e) {
       const recovered = await tryRecoverSession({
         sessionToken: state.sessionToken,
@@ -198,7 +272,9 @@ export default function App() {
         return
       }
 
-      setState((s) => ({ ...s, step: 'upload', error: `简历分析失败：${e.message}` }))
+      setState((s) => s.step === 'analyzing'
+        ? { ...s, step: 'upload', error: `简历分析失败：${e.message}` }
+        : s)
     }
   }
 
@@ -211,7 +287,9 @@ export default function App() {
         clientId: state.clientId,
         answers,
       })
-      setState((s) => ({ ...s, scripts: result.scripts, step: 'result' }))
+      setState((s) => s.step === 'generating'
+        ? { ...s, scripts: result.scripts, step: 'result' }
+        : s)
     } catch (e) {
       const recovered = await tryRecoverSession({
         sessionToken: state.sessionToken,
@@ -229,7 +307,9 @@ export default function App() {
         return
       }
 
-      setState((s) => ({ ...s, step: 'qa', error: `逐字稿生成失败：${e.message}` }))
+      setState((s) => s.step === 'generating'
+        ? { ...s, step: 'qa', error: `逐字稿生成失败：${e.message}` }
+        : s)
     }
   }
 
@@ -326,7 +406,7 @@ export default function App() {
         {step === 'generating' && (
           <LoadingState
             message="正在生成你的表达稿…"
-            submessage="AI 正在把你的经历整理成更自然、克制、可信的面试表达，大约需要 20-30 秒"
+            submessage="AI 正在把你的经历整理成更自然、克制、可信的面试表达。生成完成后会自动进入结果页。"
           />
         )}
         {step === 'result' && scripts && (

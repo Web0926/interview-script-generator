@@ -39,6 +39,7 @@ const MIME_TYPES = {
 function sendJson(res, status, payload) {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
   })
   res.end(JSON.stringify(payload))
 }

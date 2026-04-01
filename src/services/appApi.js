@@ -39,26 +39,38 @@ function getErrorMessage(code, fallback) {
   return ERROR_MESSAGES[code] || fallback || '请求失败，请稍后重试。'
 }
 
-async function request(path, { method = 'GET', body, sessionToken, clientId } = {}) {
+async function request(path, { method = 'GET', body, sessionToken, clientId, timeoutMs } = {}) {
   let response
+  const controller = new AbortController()
+  const timeoutId = timeoutMs ? window.setTimeout(() => controller.abort(), timeoutMs) : null
   try {
     const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
     response = await fetch(path, {
       method,
+      cache: 'no-store',
       headers: {
         ...(sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}),
         ...(clientId ? { 'x-client-id': clientId } : {}),
         ...(!isFormData && body ? { 'content-type': 'application/json' } : {}),
       },
       ...(body ? { body: isFormData ? body : JSON.stringify(body) } : {}),
+      signal: controller.signal,
     })
   } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('请求超时，请稍后重试。')
+    }
+
     const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false
     const fallback = isOffline
       ? '当前网络已断开，请检查网络后重试。'
       : '网络连接失败，可能是简历文件过大或服务器暂时不可达，请稍后重试。'
 
     throw new Error(error?.message === 'Failed to fetch' ? fallback : (error?.message || fallback))
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId)
+    }
   }
 
   let payload = null
@@ -110,6 +122,7 @@ export async function restoreSession({ sessionToken, clientId }) {
   return request('/api/session/current', {
     sessionToken,
     clientId,
+    timeoutMs: 8_000,
   })
 }
 
@@ -123,6 +136,7 @@ export async function analyzeResume({ sessionToken, clientId, resumeInput, file 
       sessionToken,
       clientId,
       body: formData,
+      timeoutMs: 90_000,
     })
   }
 
@@ -131,6 +145,7 @@ export async function analyzeResume({ sessionToken, clientId, resumeInput, file 
     sessionToken,
     clientId,
     body: { resumeInput },
+    timeoutMs: 90_000,
   })
 }
 
@@ -140,5 +155,6 @@ export async function generateScripts({ sessionToken, clientId, answers }) {
     sessionToken,
     clientId,
     body: { answers },
+    timeoutMs: 90_000,
   })
 }
