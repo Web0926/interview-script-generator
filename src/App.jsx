@@ -62,6 +62,14 @@ function getAnalyzingSubmessage(analysisMeta) {
   return '正在梳理最值得展开的经历，以及你可以讲清楚的问题、判断和结果'
 }
 
+async function tryRecoverSession({ sessionToken, clientId }) {
+  try {
+    return await restoreSession({ sessionToken, clientId })
+  } catch {
+    return null
+  }
+}
+
 export default function App() {
   const [state, setState] = useState(INITIAL_STATE)
 
@@ -156,6 +164,22 @@ export default function App() {
       })
       setState((s) => ({ ...s, analysisResult: result.analysisResult, step: 'qa' }))
     } catch (e) {
+      const recovered = await tryRecoverSession({
+        sessionToken: state.sessionToken,
+        clientId: state.clientId,
+      })
+
+      if (recovered?.session?.analysisResult) {
+        setState((s) => ({
+          ...s,
+          analysisResult: recovered.session.analysisResult,
+          scripts: recovered.session.scriptsResult,
+          error: null,
+          step: recovered.session.currentStep || 'qa',
+        }))
+        return
+      }
+
       setState((s) => ({ ...s, step: 'upload', error: `简历分析失败：${e.message}` }))
     }
   }
@@ -171,6 +195,22 @@ export default function App() {
       })
       setState((s) => ({ ...s, scripts: result.scripts, step: 'result' }))
     } catch (e) {
+      const recovered = await tryRecoverSession({
+        sessionToken: state.sessionToken,
+        clientId: state.clientId,
+      })
+
+      if (recovered?.session?.scriptsResult) {
+        setState((s) => ({
+          ...s,
+          analysisResult: recovered.session.analysisResult,
+          scripts: recovered.session.scriptsResult,
+          error: null,
+          step: recovered.session.currentStep || 'result',
+        }))
+        return
+      }
+
       setState((s) => ({ ...s, step: 'qa', error: `逐字稿生成失败：${e.message}` }))
     }
   }
