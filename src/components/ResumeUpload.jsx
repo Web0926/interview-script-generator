@@ -10,10 +10,14 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 const ACCEPTED = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp']
 const ACCEPTED_EXT = '.pdf,.png,.jpg,.jpeg,.webp'
-const MAX_IMAGE_WIDTH = 1600
-const MAX_IMAGE_HEIGHT = 6000
-const PDF_RENDER_SCALE = 1.4
-const EXPORT_QUALITY = 0.82
+const MAX_IMAGE_WIDTH = 1400
+const MAX_IMAGE_HEIGHT = 4800
+const PDF_RENDER_SCALE = 1.2
+const EXPORT_QUALITY_STEPS = [0.8, 0.72, 0.64, 0.56, 0.48]
+const TARGET_UPLOAD_BYTES = 650 * 1024
+const MAX_UPLOAD_BYTES = 800 * 1024
+const RESIZE_REDUCTION_FACTOR = 0.85
+const MIN_RESIZE_RATIO = 0.5
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -44,8 +48,11 @@ function normalizeCanvasSize(width, height) {
   }
 }
 
-function exportCanvas(canvas) {
-  const { width, height } = normalizeCanvasSize(canvas.width, canvas.height)
+function estimatePayloadBytes(base64) {
+  return base64.length
+}
+
+function renderCanvasToBase64(canvas, { width, height, quality }) {
   const target = document.createElement('canvas')
   target.width = width
   target.height = height
@@ -55,8 +62,57 @@ function exportCanvas(canvas) {
   ctx.fillRect(0, 0, width, height)
   ctx.drawImage(canvas, 0, 0, width, height)
 
-  const dataUrl = target.toDataURL('image/jpeg', EXPORT_QUALITY)
-  return { base64: dataUrl.split(',')[1], mediaType: 'image/jpeg' }
+  const dataUrl = target.toDataURL('image/jpeg', quality)
+  const base64 = dataUrl.split(',')[1]
+  return {
+    base64,
+    mediaType: 'image/jpeg',
+    bytes: estimatePayloadBytes(base64),
+  }
+}
+
+function exportCanvas(canvas) {
+  const normalizedSize = normalizeCanvasSize(canvas.width, canvas.height)
+  const minWidth = Math.min(normalizedSize.width, Math.max(900, Math.round(normalizedSize.width * MIN_RESIZE_RATIO)))
+  const minHeight = Math.min(normalizedSize.height, Math.max(1400, Math.round(normalizedSize.height * MIN_RESIZE_RATIO)))
+
+  let currentSize = normalizedSize
+  let bestResult = null
+
+  while (true) {
+    for (const quality of EXPORT_QUALITY_STEPS) {
+      const result = renderCanvasToBase64(canvas, {
+        width: currentSize.width,
+        height: currentSize.height,
+        quality,
+      })
+
+      if (!bestResult || result.bytes < bestResult.bytes) {
+        bestResult = result
+      }
+
+      if (result.bytes <= TARGET_UPLOAD_BYTES) {
+        return { base64: result.base64, mediaType: result.mediaType }
+      }
+    }
+
+    if (bestResult && bestResult.bytes <= MAX_UPLOAD_BYTES) {
+      return { base64: bestResult.base64, mediaType: bestResult.mediaType }
+    }
+
+    const nextSize = {
+      width: Math.max(minWidth, Math.round(currentSize.width * RESIZE_REDUCTION_FACTOR)),
+      height: Math.max(minHeight, Math.round(currentSize.height * RESIZE_REDUCTION_FACTOR)),
+    }
+
+    if (nextSize.width === currentSize.width && nextSize.height === currentSize.height) {
+      break
+    }
+
+    currentSize = nextSize
+  }
+
+  throw new Error('简历文件过大，请导出更精简的 PDF 或截图后重试')
 }
 
 async function imageFileToOptimizedBase64(file) {
@@ -244,7 +300,7 @@ export default function ResumeUpload({ onStart }) {
         onMouseEnter={(e) => { if (!btnDisabled) e.target.style.background = colors.primaryDark }}
         onMouseLeave={(e) => { if (!btnDisabled) e.target.style.background = colors.primary }}
       >
-        {converting ? 'PDF 转换中…' : '开始分析简历'}
+        {converting ? '简历处理中…' : '开始分析简历'}
       </button>
     </div>
   )

@@ -25,15 +25,25 @@ function getErrorMessage(code, fallback) {
 }
 
 async function request(path, { method = 'GET', body, sessionToken, clientId } = {}) {
-  const response = await fetch(path, {
-    method,
-    headers: {
-      'content-type': 'application/json',
-      ...(sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}),
-      ...(clientId ? { 'x-client-id': clientId } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  })
+  let response
+  try {
+    response = await fetch(path, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        ...(sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}),
+        ...(clientId ? { 'x-client-id': clientId } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })
+  } catch (error) {
+    const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false
+    const fallback = isOffline
+      ? '当前网络已断开，请检查网络后重试。'
+      : '网络连接失败，可能是简历文件过大或服务器暂时不可达，请稍后重试。'
+
+    throw new Error(error?.message === 'Failed to fetch' ? fallback : (error?.message || fallback))
+  }
 
   let payload = null
   try {
