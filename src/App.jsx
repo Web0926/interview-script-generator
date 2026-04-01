@@ -32,6 +32,16 @@ function buildAnalysisMeta(resumeInput) {
     return null
   }
 
+  if (resumeInput.file instanceof File) {
+    return {
+      kind: 'file',
+      source: 'raw_upload',
+      mimeType: resumeInput.file.type,
+      fileName: resumeInput.file.name,
+      fileSize: resumeInput.file.size,
+    }
+  }
+
   return {
     kind: resumeInput.kind,
     source: resumeInput.source,
@@ -43,6 +53,14 @@ function buildAnalysisMeta(resumeInput) {
 function getAnalyzingSubmessage(analysisMeta) {
   if (!analysisMeta) {
     return '正在梳理最值得展开的经历，以及你可以讲清楚的问题、判断和结果'
+  }
+
+  if (analysisMeta.source === 'raw_upload' && analysisMeta.mimeType === 'application/pdf') {
+    return '正在上传 PDF，并在服务器提取简历文本；这一步现在不再依赖浏览器本地解析，通常会更稳。'
+  }
+
+  if (analysisMeta.source === 'raw_upload') {
+    return '正在上传图片简历并提交服务器分析，请稍候。'
   }
 
   if (analysisMeta.source === 'pdf_text') {
@@ -149,18 +167,18 @@ export default function App() {
   }
 
   // Step 1 → 2: Upload resume and start analysis
-  async function handleUploadStart({ resumeInput }) {
+  async function handleUploadStart({ file }) {
     setState((s) => ({
       ...s,
       step: 'analyzing',
       error: null,
-      analysisMeta: buildAnalysisMeta(resumeInput),
+      analysisMeta: buildAnalysisMeta({ file }),
     }))
     try {
       const result = await analyzeResume({
         sessionToken: state.sessionToken,
         clientId: state.clientId,
-        resumeInput,
+        file,
       })
       setState((s) => ({ ...s, analysisResult: result.analysisResult, step: 'qa' }))
     } catch (e) {

@@ -14,11 +14,13 @@ import {
 } from './lib/workflow.mjs'
 import { analyzeResume, generateScripts } from './lib/aiClient.mjs'
 import { getEnv, getRootDir } from './lib/env.mjs'
+import { parseResumeFile } from './lib/resumeParser.mjs'
 
 const rootDir = getRootDir()
 const distDir = path.join(rootDir, 'dist')
 const port = Number(getEnv('PORT', '3001'))
 const MAX_JSON_BODY_BYTES = 12 * 1024 * 1024
+const MAX_MULTIPART_BODY_BYTES = 110 * 1024 * 1024
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -41,13 +43,13 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
-async function readJsonBody(req) {
+async function readRawBody(req, maxBytes) {
   const chunks = []
   let total = 0
 
   for await (const chunk of req) {
     total += chunk.length
-    if (total > MAX_JSON_BODY_BYTES) {
+    if (total > maxBytes) {
       const error = new Error('请求体过大')
       error.statusCode = 413
       error.code = 'REQUEST_TOO_LARGE'
@@ -60,14 +62,36 @@ async function readJsonBody(req) {
     return {}
   }
 
+  return Buffer.concat(chunks)
+}
+
+async function readJsonBody(req) {
+  const buffer = await readRawBody(req, MAX_JSON_BODY_BYTES)
+
+  if (!buffer.length) {
+    return {}
+  }
+
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    return JSON.parse(buffer.toString('utf8'))
   } catch {
     const error = new Error('请求体不是合法 JSON')
     error.statusCode = 400
     error.code = 'INVALID_JSON'
     throw error
   }
+}
+
+async function readFormDataBody(req) {
+  const buffer = await readRawBody(req, MAX_MULTIPART_BODY_BYTES)
+
+  const request = new Request('http://localhost/api/resume/analyze', {
+    method: req.method,
+    headers: req.headers,
+    body: buffer,
+  })
+
+  return request.formData()
 }
 
 function getClientId(req) {
@@ -184,10 +208,32 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/resume/analyze') {
-    const body = await readJsonBody(req)
     const sessionToken = getSessionToken(req)
     const clientId = getClientId(req)
-    const normalizedPayload = normalizeIncomingResumePayload(body)
+    const contentType = String(req.headers['content-type'] || '')
+    let normalizedPayload
+
+    try {
+      if (contentType.includes('multipart/form-data')) {
+        const formData = await readFormDataBody(req)
+        const file = formData.get('file')
+        const resumeInput = await parseResumeFile(file)
+        normalizedPayload = {
+          requestFormat: 'raw_file',
+          resumeInput,
+        }
+      } else {
+        const body = await readJsonBody(req)
+        normalizedPayload = normalizeIncomingResumePayload(body)
+      }
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, {
+        ok: false,
+        code: error.code || 'RESUME_CONTENT_EMPTY',
+        error: error.message,
+      })
+    }
+
     const resumeSummary = summarizeResumeInput(normalizedPayload.resumeInput)
 
     console.log('[resume.analyze] start', JSON.stringify({

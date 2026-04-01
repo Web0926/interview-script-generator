@@ -22,10 +22,14 @@ const ERROR_MESSAGES = {
   RESUME_CONTENT_EMPTY: '没有从简历里识别到可分析的内容，请换一份更清晰的简历后重试。',
   PDF_PAGE_LIMIT_EXCEEDED: '简历页数过多，请上传更精简的简历版本。',
   SCAN_PDF_PAGE_LIMIT: '扫描版 PDF 页数过多，请上传前 3 页或改用文字版 PDF。',
+  SCAN_PDF_NEEDS_IMAGE: '当前 PDF 更像扫描件，请先转成图片上传，或导出为可复制文字的 PDF。',
   RESUME_IMAGE_PAGE_LIMIT: '当前最多支持 3 张页面图片，请上传更精简的内容。',
   RESUME_IMAGE_TOO_LARGE: '扫描页图片过大，请换更精简的 PDF 或图片后重试。',
   PDF_TOO_LARGE: 'PDF 文件不能超过 100MB。',
   IMAGE_TOO_LARGE: '图片简历不能超过 30MB，请压缩后重试。',
+  PDF_PASSWORD_PROTECTED: '暂不支持带密码的 PDF，请去掉密码后重试。',
+  INVALID_PDF: 'PDF 文件无法解析，请重新导出后重试。',
+  UNSUPPORTED_FILE_TYPE: '不支持该格式，请上传 PDF、PNG、JPG 或 WebP 文件。',
   REQUEST_TOO_LARGE: '上传内容过大，请换更精简的简历版本后重试。',
   INVALID_JSON: '上传内容格式不正确，请刷新页面后重试。',
   INTERNAL_ERROR: '服务器暂时开小差了，请稍后再试。',
@@ -38,14 +42,15 @@ function getErrorMessage(code, fallback) {
 async function request(path, { method = 'GET', body, sessionToken, clientId } = {}) {
   let response
   try {
+    const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
     response = await fetch(path, {
       method,
       headers: {
-        'content-type': 'application/json',
         ...(sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}),
         ...(clientId ? { 'x-client-id': clientId } : {}),
+        ...(!isFormData && body ? { 'content-type': 'application/json' } : {}),
       },
-      ...(body ? { body: JSON.stringify(body) } : {}),
+      ...(body ? { body: isFormData ? body : JSON.stringify(body) } : {}),
     })
   } catch (error) {
     const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false
@@ -108,7 +113,19 @@ export async function restoreSession({ sessionToken, clientId }) {
   })
 }
 
-export async function analyzeResume({ sessionToken, clientId, resumeInput }) {
+export async function analyzeResume({ sessionToken, clientId, resumeInput, file }) {
+  if (file instanceof File) {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    return request('/api/resume/analyze', {
+      method: 'POST',
+      sessionToken,
+      clientId,
+      body: formData,
+    })
+  }
+
   return request('/api/resume/analyze', {
     method: 'POST',
     sessionToken,
