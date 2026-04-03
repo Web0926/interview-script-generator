@@ -26,7 +26,7 @@ export async function code2Session(jsCode) {
 
   return {
     openid: data.openid,
-    sessionKey: data.session_key,
+    sessionKey: data.session_key,  // needed for virtual payment signature
     unionid: data.unionid || null,
   }
 }

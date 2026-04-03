@@ -1,6 +1,16 @@
 import crypto from 'node:crypto'
 import { getEnv } from './env.mjs'
 
+/**
+ * WeChat Mini Program Virtual Payment (虚拟支付)
+ * Uses wx.requestVirtualPayment API
+ */
+
+const OFFER_ID = () => getEnv('WX_OFFER_ID')
+const APP_KEY = () => getEnv('WX_APP_KEY')
+const PRODUCT_ID = () => getEnv('WX_PRODUCT_ID', 'interview_session_1')
+const GOODS_PRICE = () => Number(getEnv('WX_GOODS_PRICE', '4990'))
+
 function generateOutTradeNo() {
   const now = new Date()
   const date = now.toISOString().slice(0, 10).replace(/-/g, '')
@@ -8,72 +18,133 @@ function generateOutTradeNo() {
   return `WX${date}${rand}`
 }
 
-export async function createUnifiedOrder({ openid, totalFee, description }) {
-  const appid = getEnv('WX_APPID')
-  const mchId = getEnv('WX_MCH_ID')
-  const mchKey = getEnv('WX_MCH_KEY')
-  const notifyUrl = getEnv('WX_PAY_NOTIFY_URL')
+/**
+ * Calculate paySig = HMAC-SHA256(appKey, uri + "&" + signDataJson)
+ */
+function calcPaySig(uri, signDataJson) {
+  const appKey = APP_KEY()
+  const msg = uri + '&' + signDataJson
+  return crypto.createHmac('sha256', appKey).update(msg, 'utf8').digest('hex')
+}
 
-  if (!mchId || !mchKey) {
-    throw Object.assign(new Error('微信支付未配置'), { code: 'WX_PAY_NOT_CONFIGURED' })
+/**
+ * Calculate signature = HMAC-SHA256(session_key, signDataJson)
+ */
+function calcSignature(signDataJson, sessionKey) {
+  return crypto.createHmac('sha256', sessionKey).update(signDataJson, 'utf8').digest('hex')
+}
+
+/**
+ * Build virtual payment params for wx.requestVirtualPayment
+ * @param {object} opts
+ * @param {string} opts.sessionKey - user's session_key from code2Session
+ * @param {number} opts.userId - internal user id (for attach data)
+ * @param {string} opts.outTradeNo - order number
+ * @param {number} [opts.env=1] - 0=production, 1=sandbox
+ */
+export function buildVirtualPaymentParams({ sessionKey, userId, outTradeNo, env = 1 }) {
+  const offerId = OFFER_ID()
+  const productId = PRODUCT_ID()
+  const goodsPrice = GOODS_PRICE()
+
+  if (!offerId || !APP_KEY()) {
+    throw Object.assign(new Error('虚拟支付未配置'), { code: 'WX_VPAY_NOT_CONFIGURED' })
   }
 
-  const outTradeNo = generateOutTradeNo()
-
-  const body = {
-    appid,
-    mchid: mchId,
-    description: description || '面试逐字稿生成器 - 使用次数',
-    out_trade_no: outTradeNo,
-    notify_url: notifyUrl,
-    amount: {
-      total: totalFee,
-      currency: 'CNY',
-    },
-    payer: {
-      openid,
-    },
-  }
-
-  // NOTE: Production needs proper WeChat Pay V3 signature with merchant private key.
-  // This returns the structure needed; the actual API call requires signing.
-  return {
+  const signData = {
+    offerId,
+    buyQuantity: 1,
+    currencyType: 'CNY',
     outTradeNo,
-    body,
+    attach: JSON.stringify({ userId }),
+    env,
+    productId,
+    goodsPrice,
+  }
+
+  // MUST stringify server-side to ensure consistent JSON format
+  const signDataJson = JSON.stringify(signData)
+
+  const paySig = calcPaySig('requestVirtualPayment', signDataJson)
+  const signature = calcSignature(signDataJson, sessionKey)
+
+  return {
+    mode: 'short_series_goods',
+    signData,
+    paySig,
+    signature,
   }
 }
 
-export function getPaymentParams(prepayId) {
+/**
+ * Verify delivery callback signature (optional but recommended)
+ */
+export function calcNotifyPaySig(uri, bodyJson) {
+  return calcPaySig(uri, bodyJson)
+}
+
+/**
+ * Call /xpay/notify_provide_goods to confirm delivery to WeChat
+ */
+export async function notifyProvideGoods({ outTradeNo }) {
   const appid = getEnv('WX_APPID')
-  const mchKey = getEnv('WX_MCH_KEY')
-  const timestamp = String(Math.floor(Date.now() / 1000))
-  const nonceStr = crypto.randomBytes(16).toString('hex')
+  const offerId = OFFER_ID()
 
-  const message = `${appid}\n${timestamp}\n${nonceStr}\nprepay_id=${prepayId}\n`
-
-  const paySign = crypto
-    .createHmac('sha256', mchKey)
-    .update(message)
-    .digest('hex')
-    .toUpperCase()
-
-  return {
-    timeStamp: timestamp,
-    nonceStr,
-    package: `prepay_id=${prepayId}`,
-    signType: 'HMAC-SHA256',
-    paySign,
+  const data = {
+    openid: '', // filled by caller if needed
+    appid,
+    offer_id: offerId,
+    out_trade_no: outTradeNo,
+    product_id: PRODUCT_ID(),
+    quantity: 1,
   }
+
+  const dataJson = JSON.stringify(data)
+  const paySig = calcPaySig('/xpay/notify_provide_goods', dataJson)
+
+  const accessToken = await getAccessToken()
+
+  const url = `https://api.weixin.qq.com/xpay/notify_provide_goods?pay_sig=${encodeURIComponent(paySig)}&access_token=${encodeURIComponent(accessToken)}`
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: dataJson,
+  })
+
+  const result = await res.json()
+  console.log('[wx-vpay] notify_provide_goods response:', JSON.stringify(result))
+  return result
 }
 
-export function parsePayNotification(body) {
-  if (!body || !body.resource) {
-    return null
+/**
+ * Get access_token for server-to-server API calls
+ */
+let cachedAccessToken = null
+let tokenExpiresAt = 0
+
+async function getAccessToken() {
+  if (cachedAccessToken && Date.now() < tokenExpiresAt) {
+    return cachedAccessToken
   }
 
-  return {
-    outTradeNo: body.resource?.out_trade_no,
-    transactionId: body.resource?.transaction_id,
-    tradeState: body.resource?.trade_state,
+  const appid = getEnv('WX_APPID')
+  const secret = getEnv('WX_SECRET')
+
+  const url = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${appid}&secret=${secret}`
+  const res = await fetch(url)
+  const data = await res.json()
+
+  if (data.errcode) {
+    console.error('[wx-vpay] getAccessToken failed:', JSON.stringify(data))
+    throw new Error('获取access_token失败')
   }
+
+  cachedAccessToken = data.access_token
+  // Expire 5 minutes early to be safe
+  tokenExpiresAt = Date.now() + (data.expires_in - 300) * 1000
+
+  return cachedAccessToken
 }
+
+export { generateOutTradeNo }

@@ -18,7 +18,7 @@ import { parseResumeFile } from './lib/resumeParser.mjs'
 import { startPeriodicSync, syncNewOrders, getSyncStatus } from './lib/xhs-sync.mjs'
 import { isConfigured as isXHSConfigured, getTokenStatus } from './lib/xhs-client.mjs'
 import { wxLogin, getWxUserInfo, createPayOrder, handlePaymentSuccess, startWxSession } from './lib/wx-workflow.mjs'
-import { createUnifiedOrder, getPaymentParams } from './lib/wx-pay.mjs'
+import { notifyProvideGoods } from './lib/wx-pay.mjs'
 
 const rootDir = getRootDir()
 const distDir = path.join(rootDir, 'dist')
@@ -382,40 +382,38 @@ async function handleApi(req, res, url) {
     return sendJson(res, result.ok ? 200 : 400, result)
   }
 
+  // Virtual payment: generate signed params for wx.requestVirtualPayment
   if (req.method === 'POST' && url.pathname === '/api/wx/pay/create') {
     const token = getSessionToken(req)
-    const orderResult = await createPayOrder(token)
-    if (!orderResult.ok) {
-      return sendJson(res, 400, orderResult)
-    }
-
-    try {
-      const payResult = await createUnifiedOrder({
-        openid: orderResult.openid,
-        totalFee: orderResult.order.totalFee,
-        description: '面试逐字稿生成器 - 使用次数',
-      })
-      return sendJson(res, 200, {
-        ok: true,
-        order: orderResult.order,
-        outTradeNo: payResult.outTradeNo,
-      })
-    } catch (error) {
-      return sendJson(res, 500, {
-        ok: false,
-        code: error.code || 'WX_PAY_FAILED',
-        error: error.message,
-      })
-    }
+    const result = await createPayOrder(token)
+    return sendJson(res, result.ok ? 200 : 400, result)
   }
 
+  // Virtual payment: delivery callback from WeChat (xpay_goods_deliver_notify)
   if (req.method === 'POST' && url.pathname === '/api/wx/pay/notify') {
     const body = await readJsonBody(req)
-    console.log('[wx-pay] notify received', JSON.stringify(body))
-    if (body.out_trade_no) {
-      await handlePaymentSuccess(body.out_trade_no)
+    console.log('[wx-vpay] delivery callback received:', JSON.stringify(body))
+
+    try {
+      const outTradeNo = body.OutTradeNo || body.out_trade_no
+      if (outTradeNo) {
+        await handlePaymentSuccess(outTradeNo)
+
+        // Confirm delivery to WeChat
+        try {
+          await notifyProvideGoods({ outTradeNo })
+        } catch (e) {
+          console.error('[wx-vpay] notifyProvideGoods failed:', e.message)
+        }
+      }
+    } catch (e) {
+      console.error('[wx-vpay] delivery callback error:', e.message)
     }
-    return sendJson(res, 200, { code: 'SUCCESS', message: '' })
+
+    // WeChat expects this exact XML response
+    res.writeHead(200, { 'Content-Type': 'application/xml' })
+    res.end('<xml><ErrCode>0</ErrCode><ErrMsg><![CDATA[success]]></ErrMsg></xml>')
+    return
   }
 
   // ─── Admin routes (protected by ADMIN_TOKEN) ───────────────────

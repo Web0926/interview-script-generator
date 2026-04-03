@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { withWxState, readWxState } from './wx-store.mjs'
 import { withState, readState } from './store.mjs'
 import { code2Session, generateUserToken } from './wx-auth.mjs'
+import { buildVirtualPaymentParams, generateOutTradeNo } from './wx-pay.mjs'
 
 const SESSION_TTL_HOURS = 24
 
@@ -25,6 +26,7 @@ export async function wxLogin(jsCode) {
       user = {
         id: usersStore.nextId++,
         openid,
+        sessionKey: wxResult.sessionKey,
         token: generateUserToken(),
         remainingSessions: 0,
         totalPurchased: 0,
@@ -34,6 +36,7 @@ export async function wxLogin(jsCode) {
       }
       usersStore.users.push(user)
     } else {
+      user.sessionKey = wxResult.sessionKey
       user.token = generateUserToken()
       user.updatedAt = timestamp
     }
@@ -80,33 +83,45 @@ export async function createPayOrder(token) {
     return { ok: false, code: 'WX_INVALID_TOKEN' }
   }
 
-  return withWxState(({ wxOrdersStore }) => {
-    const timestamp = nowIso()
-    const outTradeNo = `WX${Date.now()}${crypto.randomBytes(4).toString('hex')}`
+  if (!user.sessionKey) {
+    return { ok: false, code: 'WX_SESSION_EXPIRED', error: '登录已过期，请重新进入小程序' }
+  }
 
+  const outTradeNo = generateOutTradeNo()
+
+  // Save order record
+  await withWxState(({ wxOrdersStore }) => {
+    const timestamp = nowIso()
     const order = {
       id: wxOrdersStore.nextId++,
       userId: user.id,
       outTradeNo,
-      prepayId: null,
-      totalFee: 990,
+      totalFee: Number(process.env.WX_GOODS_PRICE || 4990),
       status: 'pending',
       paidAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     }
     wxOrdersStore.orders.push(order)
+  })
+
+  // Build signed virtual payment params
+  try {
+    const payParams = buildVirtualPaymentParams({
+      sessionKey: user.sessionKey,
+      userId: user.id,
+      outTradeNo,
+      env: 1, // 1=sandbox, 0=production
+    })
 
     return {
       ok: true,
-      order: {
-        id: order.id,
-        outTradeNo: order.outTradeNo,
-        totalFee: order.totalFee,
-      },
-      openid: user.openid,
+      outTradeNo,
+      payParams, // { mode, signData, paySig, signature }
     }
-  })
+  } catch (err) {
+    return { ok: false, code: err.code || 'WX_PAY_FAILED', error: err.message }
+  }
 }
 
 export async function handlePaymentSuccess(outTradeNo) {
