@@ -70,7 +70,7 @@ export function buildVirtualPaymentParams({ sessionKey, userId, outTradeNo, env 
 
   return {
     mode: 'short_series_goods',
-    signData,
+    signData: signDataJson,  // MUST be string, not object
     paySig,
     signature,
   }

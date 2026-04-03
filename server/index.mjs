@@ -389,31 +389,55 @@ async function handleApi(req, res, url) {
     return sendJson(res, result.ok ? 200 : 400, result)
   }
 
-  // Virtual payment: delivery callback from WeChat (xpay_goods_deliver_notify)
-  if (req.method === 'POST' && url.pathname === '/api/wx/pay/notify') {
-    const body = await readJsonBody(req)
-    console.log('[wx-vpay] delivery callback received:', JSON.stringify(body))
+  // WeChat message push: URL verification (GET) + delivery callback (POST)
+  if (url.pathname === '/api/wx/pay/notify') {
+    const WX_MSG_TOKEN = getEnv('WX_MSG_TOKEN', 'interviewmaster2026')
 
-    try {
-      const outTradeNo = body.OutTradeNo || body.out_trade_no
-      if (outTradeNo) {
-        await handlePaymentSuccess(outTradeNo)
+    // GET: WeChat URL verification
+    if (req.method === 'GET') {
+      const signature = url.searchParams.get('signature')
+      const timestamp = url.searchParams.get('timestamp')
+      const nonce = url.searchParams.get('nonce')
+      const echostr = url.searchParams.get('echostr')
 
-        // Confirm delivery to WeChat
-        try {
-          await notifyProvideGoods({ outTradeNo })
-        } catch (e) {
-          console.error('[wx-vpay] notifyProvideGoods failed:', e.message)
-        }
+      const arr = [WX_MSG_TOKEN, timestamp, nonce].sort()
+      const hash = (await import('node:crypto')).createHash('sha1').update(arr.join('')).digest('hex')
+
+      if (hash === signature) {
+        console.log('[wx-msg] URL verification passed')
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end(echostr)
+      } else {
+        console.error('[wx-msg] URL verification failed', { signature, hash })
+        res.writeHead(403)
+        res.end('Forbidden')
       }
-    } catch (e) {
-      console.error('[wx-vpay] delivery callback error:', e.message)
+      return
     }
 
-    // WeChat expects this exact XML response
-    res.writeHead(200, { 'Content-Type': 'application/xml' })
-    res.end('<xml><ErrCode>0</ErrCode><ErrMsg><![CDATA[success]]></ErrMsg></xml>')
-    return
+    // POST: delivery callback (xpay_goods_deliver_notify)
+    if (req.method === 'POST') {
+      const body = await readJsonBody(req)
+      console.log('[wx-vpay] delivery callback:', JSON.stringify(body))
+
+      try {
+        const outTradeNo = body.OutTradeNo || body.out_trade_no
+        if (outTradeNo) {
+          await handlePaymentSuccess(outTradeNo)
+
+          // Confirm delivery to WeChat
+          try {
+            await notifyProvideGoods({ outTradeNo })
+          } catch (e) {
+            console.error('[wx-vpay] notifyProvideGoods failed:', e.message)
+          }
+        }
+      } catch (e) {
+        console.error('[wx-vpay] delivery callback error:', e.message)
+      }
+
+      return sendJson(res, 200, { ErrCode: 0, ErrMsg: 'success' })
+    }
   }
 
   // ─── Admin routes (protected by ADMIN_TOKEN) ───────────────────
