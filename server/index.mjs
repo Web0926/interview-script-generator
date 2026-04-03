@@ -15,6 +15,10 @@ import {
 import { analyzeResume, generateScripts } from './lib/aiClient.mjs'
 import { getEnv, getRootDir } from './lib/env.mjs'
 import { parseResumeFile } from './lib/resumeParser.mjs'
+import { startPeriodicSync, syncNewOrders, getSyncStatus } from './lib/xhs-sync.mjs'
+import { isConfigured as isXHSConfigured, getTokenStatus } from './lib/xhs-client.mjs'
+import { wxLogin, getWxUserInfo, createPayOrder, handlePaymentSuccess, startWxSession } from './lib/wx-workflow.mjs'
+import { createUnifiedOrder, getPaymentParams } from './lib/wx-pay.mjs'
 
 const rootDir = getRootDir()
 const distDir = path.join(rootDir, 'dist')
@@ -355,6 +359,98 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // ─── WeChat Mini Program routes ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/wx/login') {
+    const body = await readJsonBody(req)
+    if (!body.code) {
+      return sendJson(res, 400, { ok: false, code: 'MISSING_CODE' })
+    }
+    const result = await wxLogin(body.code)
+    return sendJson(res, result.ok ? 200 : 400, result)
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/wx/user/info') {
+    const token = getSessionToken(req)
+    const result = await getWxUserInfo(token)
+    return sendJson(res, result.ok ? 200 : 400, result)
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/wx/session/start') {
+    const token = getSessionToken(req)
+    const clientId = getClientId(req)
+    const result = await startWxSession(token, clientId)
+    return sendJson(res, result.ok ? 200 : 400, result)
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/wx/pay/create') {
+    const token = getSessionToken(req)
+    const orderResult = await createPayOrder(token)
+    if (!orderResult.ok) {
+      return sendJson(res, 400, orderResult)
+    }
+
+    try {
+      const payResult = await createUnifiedOrder({
+        openid: orderResult.openid,
+        totalFee: orderResult.order.totalFee,
+        description: '面试逐字稿生成器 - 使用次数',
+      })
+      return sendJson(res, 200, {
+        ok: true,
+        order: orderResult.order,
+        outTradeNo: payResult.outTradeNo,
+      })
+    } catch (error) {
+      return sendJson(res, 500, {
+        ok: false,
+        code: error.code || 'WX_PAY_FAILED',
+        error: error.message,
+      })
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/wx/pay/notify') {
+    const body = await readJsonBody(req)
+    console.log('[wx-pay] notify received', JSON.stringify(body))
+    if (body.out_trade_no) {
+      await handlePaymentSuccess(body.out_trade_no)
+    }
+    return sendJson(res, 200, { code: 'SUCCESS', message: '' })
+  }
+
+  // ─── Admin routes (protected by ADMIN_TOKEN) ───────────────────
+  if (url.pathname.startsWith('/api/admin/')) {
+    const adminToken = getEnv('ADMIN_TOKEN')
+    if (!adminToken) {
+      return sendJson(res, 403, { ok: false, code: 'ADMIN_NOT_CONFIGURED' })
+    }
+
+    const authHeader = req.headers['authorization'] || ''
+    const providedToken = authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7)
+      : url.searchParams.get('token')
+
+    if (providedToken !== adminToken) {
+      return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED' })
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/admin/sync-status') {
+      return sendJson(res, 200, {
+        ok: true,
+        xhsConfigured: isXHSConfigured(),
+        tokenStatus: getTokenStatus(),
+        sync: getSyncStatus(),
+      })
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/admin/sync-now') {
+      const result = await syncNewOrders()
+      return sendJson(res, 200, { ok: true, result })
+    }
+
+    return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' })
+  }
+
   return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' })
 }
 
@@ -408,6 +504,17 @@ async function serveStatic(req, res, url) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+
+    // CORS for Mini Program
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Client-Id, X-Platform')
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204)
+      res.end()
+      return
+    }
+
     if (url.pathname.startsWith('/api/')) {
       await handleApi(req, res, url)
       return
@@ -426,4 +533,10 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`)
+
+  if (isXHSConfigured()) {
+    startPeriodicSync()
+  } else if (getEnv('XHS_APP_KEY')) {
+    console.log('[xhs.sync] XHS app key found but no token yet. Run: npm run xhs-auth')
+  }
 })

@@ -351,6 +351,29 @@ function readSessionWithOrder(state, { sessionToken, clientId }) {
   }
 
   const order = state.ordersStore.orders.find((item) => item.id === session.orderId)
+
+  // Support WeChat sessions (no XHS order)
+  if (!order && session.wxUserId) {
+    if (session.expiresAt && new Date(session.expiresAt).getTime() <= Date.now()) {
+      expireSession(session)
+      return { ok: false, code: 'SESSION_EXPIRED' }
+    }
+
+    if (session.status === 'expired') {
+      return { ok: false, code: 'SESSION_EXPIRED' }
+    }
+
+    if (session.clientId !== clientId) {
+      return { ok: false, code: 'SESSION_OWNERSHIP_MISMATCH' }
+    }
+
+    const virtualOrder = {
+      orderNo: `wx-${session.wxUserId}`,
+      orderStatus: session.status === 'completed' ? 'used' : 'active',
+    }
+    return { ok: true, order: virtualOrder, session }
+  }
+
   if (!order) {
     return { ok: false, code: 'INVALID_SESSION' }
   }
@@ -508,9 +531,11 @@ export async function completeGeneration({ sessionToken, clientId, scriptsResult
     session.scriptsResult = scriptsResult
     session.lastError = null
     updateCurrentStep(session, 'result')
-    order.orderStatus = 'used'
-    order.usedAt = timestamp
-    order.updatedAt = timestamp
+    if (order.id) {
+      order.orderStatus = 'used'
+      order.usedAt = timestamp
+      order.updatedAt = timestamp
+    }
 
     return {
       ok: true,

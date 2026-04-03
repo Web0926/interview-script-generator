@@ -10,7 +10,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "NODE_USE_ENV_PROXY=1 node server/index.mjs",
-    "add-order": "node server/scripts/add-order.mjs"
+    "add-order": "node server/scripts/add-order.mjs",
+    "xhs-auth": "node server/scripts/xhs-auth.mjs"
   },
   "dependencies": {
     "pdfjs-dist": "^5.5.207",
