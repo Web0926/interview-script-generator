@@ -147,6 +147,8 @@ export async function handlePaymentSuccess(outTradeNo) {
 }
 
 async function findActiveWxSession(wxUserId, clientId) {
+  // WX mini program: user already authenticated by openid (wxUserId)
+  // No clientId check needed — clientId changes when user clears cache
   const { sessionsStore } = await readState()
 
   const session = sessionsStore.sessions
@@ -160,8 +162,34 @@ async function findActiveWxSession(wxUserId, clientId) {
 
   if (!session) return null
 
+  // Auto-expire stuck processing sessions (over 5 minutes)
+  if (session.status === 'processing') {
+    const updatedAt = session.updatedAt ? new Date(session.updatedAt).getTime() : 0
+    const elapsed = Date.now() - updatedAt
+    if (elapsed > 5 * 60 * 1000) {
+      console.log('[findActiveWxSession] auto-expiring stuck session', session.id, 'after', Math.round(elapsed / 1000), 'seconds')
+      return withState(({ sessionsStore: ss }) => {
+        const s = ss.sessions.find((x) => x.id === session.id)
+        if (s) {
+          s.status = 'expired'
+          s.lastError = '会话超时，请重新开始'
+          s.updatedAt = nowIso()
+        }
+        return null // Allow creating new session
+      })
+    }
+  }
+
+  // Sync clientId to current device (clientId may change after cache clear)
   if (session.clientId !== clientId) {
-    return { ok: false, code: 'ORDER_ALREADY_CLAIMED' }
+    console.log('[findActiveWxSession] syncing clientId for wx session', session.id)
+    await withState(({ sessionsStore: ss }) => {
+      const s = ss.sessions.find((x) => x.id === session.id)
+      if (s) {
+        s.clientId = clientId
+        s.updatedAt = nowIso()
+      }
+    })
   }
 
   return {

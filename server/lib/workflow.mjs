@@ -353,6 +353,7 @@ function readSessionWithOrder(state, { sessionToken, clientId }) {
   const order = state.ordersStore.orders.find((item) => item.id === session.orderId)
 
   // Support WeChat sessions (no XHS order)
+  // WX users are authenticated by openid — skip clientId check
   if (!order && session.wxUserId) {
     if (session.expiresAt && new Date(session.expiresAt).getTime() <= Date.now()) {
       expireSession(session)
@@ -363,8 +364,9 @@ function readSessionWithOrder(state, { sessionToken, clientId }) {
       return { ok: false, code: 'SESSION_EXPIRED' }
     }
 
-    if (session.clientId !== clientId) {
-      return { ok: false, code: 'SESSION_OWNERSHIP_MISMATCH' }
+    // Sync clientId if changed (e.g. after cache clear in devtools)
+    if (session.clientId !== clientId && clientId) {
+      session.clientId = clientId
     }
 
     const virtualOrder = {
@@ -493,7 +495,19 @@ export async function beginGeneration({ sessionToken, clientId }) {
     }
 
     if (session.status === 'processing') {
-      return { ok: false, code: 'SESSION_BUSY' }
+      // If stuck in processing for over 5 minutes, auto-recover
+      const stuckMinutes = 5
+      const updatedAt = session.updatedAt ? new Date(session.updatedAt).getTime() : 0
+      const elapsed = Date.now() - updatedAt
+      if (elapsed > stuckMinutes * 60 * 1000) {
+        console.log('[beginGeneration] auto-recovering stuck session after', Math.round(elapsed / 1000), 'seconds')
+        session.status = 'active'
+        session.lastError = null
+        if (order.orderStatus) order.orderStatus = 'active'
+        // fall through to start generation
+      } else {
+        return { ok: false, code: 'SESSION_BUSY' }
+      }
     }
 
     const resumeInput = getResumeInputFromSession(session)
@@ -503,9 +517,12 @@ export async function beginGeneration({ sessionToken, clientId }) {
 
     session.status = 'processing'
     session.lastError = null
+    session.updatedAt = nowIso()
     updateCurrentStep(session, 'generating')
-    order.orderStatus = 'processing'
-    order.updatedAt = nowIso()
+    if (order.id) {
+      order.orderStatus = 'processing'
+      order.updatedAt = nowIso()
+    }
 
     return {
       ok: true,

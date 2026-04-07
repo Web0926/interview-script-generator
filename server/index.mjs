@@ -258,50 +258,54 @@ async function handleApi(req, res, url) {
       return sendJson(res, 400, prepareResult)
     }
 
-    try {
-      const analysisResult = await analyzeResume(normalizedPayload.resumeInput)
-      const saved = await saveAnalysisResult({ sessionToken, clientId, analysisResult })
-      if (!saved.ok) {
-        console.error('[resume.analyze] save failed', JSON.stringify({
+    // Return immediately after upload+prepare succeeds.
+    // LLM analysis runs in background; client polls /api/session/current for result.
+    // This avoids holding a long-running HTTP connection (30-80s) across WeChat devtools
+    // proxy / nginx / PM2 which would otherwise get killed by intermediate timeouts.
+    sendJson(res, 200, {
+      ok: true,
+      queued: true,
+      message: '分析已开始，请等待结果',
+    })
+
+    // Background analysis (fire-and-forget)
+    ;(async () => {
+      try {
+        const analysisResult = await analyzeResume(normalizedPayload.resumeInput)
+        const saved = await saveAnalysisResult({ sessionToken, clientId, analysisResult })
+        if (!saved.ok) {
+          console.error('[resume.analyze] save failed', JSON.stringify({
+            sessionTail: sessionToken.slice(-6),
+            code: saved.code,
+          }))
+          await saveAnalysisFailure({
+            sessionToken,
+            clientId,
+            errorMessage: '保存分析结果失败，请重试。',
+          })
+          return
+        }
+        console.log('[resume.analyze] success', JSON.stringify({
           sessionTail: sessionToken.slice(-6),
-          code: saved.code,
+          requestFormat: normalizedPayload.requestFormat,
+          questionCount: Array.isArray(analysisResult?.questions) ? analysisResult.questions.length : 0,
         }))
-        return sendJson(res, 500, {
-          ok: false,
-          code: saved.code || 'INTERNAL_ERROR',
-          error: '保存分析结果失败，请重试。',
+      } catch (error) {
+        console.error('[resume.analyze] failed', JSON.stringify({
+          sessionTail: sessionToken.slice(-6),
+          code: error.code || 'ANALYZE_FAILED',
+          message: error.message,
+          requestFormat: normalizedPayload.requestFormat,
+          ...resumeSummary,
+        }))
+        await saveAnalysisFailure({
+          sessionToken,
+          clientId,
+          errorMessage: error.message,
         })
       }
-      console.log('[resume.analyze] success', JSON.stringify({
-        sessionTail: sessionToken.slice(-6),
-        requestFormat: normalizedPayload.requestFormat,
-        questionCount: Array.isArray(analysisResult?.questions) ? analysisResult.questions.length : 0,
-      }))
-      return sendJson(res, 200, {
-        ok: true,
-        analysisResult,
-        session: saved.session,
-      })
-    } catch (error) {
-      console.error('[resume.analyze] failed', JSON.stringify({
-        sessionTail: sessionToken.slice(-6),
-        code: error.code || 'ANALYZE_FAILED',
-        message: error.message,
-        requestFormat: normalizedPayload.requestFormat,
-        ...resumeSummary,
-      }))
-      await saveAnalysisFailure({
-        sessionToken,
-        clientId,
-        errorMessage: error.message,
-      })
-
-      return sendJson(res, 500, {
-        ok: false,
-        code: error.code || 'ANALYZE_FAILED',
-        error: error.message,
-      })
-    }
+    })()
+    return
   }
 
   if (req.method === 'POST' && url.pathname === '/api/scripts/generate') {
@@ -321,42 +325,54 @@ async function handleApi(req, res, url) {
       ...summarizeResumeInput(beginResult.payload.resumeInput),
     }))
 
-    try {
-      const scriptsResult = await generateScripts(
-        beginResult.payload.resumeInput,
-        beginResult.payload.questions,
-        body.answers ?? []
-      )
+    // Return immediately; LLM generation runs in background.
+    // Client's generating page polls /api/session/current for scriptsResult.
+    sendJson(res, 200, {
+      ok: true,
+      queued: true,
+      message: '逐字稿生成中，请等待结果',
+    })
 
-      const completed = await completeGeneration({ sessionToken, clientId, scriptsResult })
-      console.log('[scripts.generate] success', JSON.stringify({
-        sessionTail: sessionToken.slice(-6),
-        hasIntro: Boolean(scriptsResult?.selfIntro),
-        projectCount: Array.isArray(scriptsResult?.projects) ? scriptsResult.projects.length : 0,
-      }))
-      return sendJson(res, 200, {
-        ok: true,
-        scripts: scriptsResult,
-        session: completed.session,
-      })
-    } catch (error) {
-      console.error('[scripts.generate] failed', JSON.stringify({
-        sessionTail: sessionToken.slice(-6),
-        code: error.code || 'GENERATE_FAILED',
-        message: error.message,
-      }))
-      await failGeneration({
-        sessionToken,
-        clientId,
-        errorMessage: error.message,
-      })
+    ;(async () => {
+      try {
+        const scriptsResult = await generateScripts(
+          beginResult.payload.resumeInput,
+          beginResult.payload.questions,
+          body.answers ?? []
+        )
 
-      return sendJson(res, 500, {
-        ok: false,
-        code: error.code || 'GENERATE_FAILED',
-        error: error.message,
-      })
-    }
+        const completed = await completeGeneration({ sessionToken, clientId, scriptsResult })
+        if (!completed.ok) {
+          console.error('[scripts.generate] complete failed', JSON.stringify({
+            sessionTail: sessionToken.slice(-6),
+            code: completed.code,
+          }))
+          await failGeneration({
+            sessionToken,
+            clientId,
+            errorMessage: '保存逐字稿失败，请重试。',
+          })
+          return
+        }
+        console.log('[scripts.generate] success', JSON.stringify({
+          sessionTail: sessionToken.slice(-6),
+          hasIntro: Boolean(scriptsResult?.selfIntro),
+          projectCount: Array.isArray(scriptsResult?.projects) ? scriptsResult.projects.length : 0,
+        }))
+      } catch (error) {
+        console.error('[scripts.generate] failed', JSON.stringify({
+          sessionTail: sessionToken.slice(-6),
+          code: error.code || 'GENERATE_FAILED',
+          message: error.message,
+        }))
+        await failGeneration({
+          sessionToken,
+          clientId,
+          errorMessage: error.message,
+        })
+      }
+    })()
+    return
   }
 
   // ─── WeChat Mini Program routes ────────────────────────────────
