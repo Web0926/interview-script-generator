@@ -112,12 +112,27 @@ async function parsePdfFile(file) {
   }
 }
 
-async function parseImageFile(file) {
+const EXT_TO_IMAGE_MIME = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+}
+
+function getFileExtension(name) {
+  const lower = String(name || '').toLowerCase()
+  const dot = lower.lastIndexOf('.')
+  if (dot < 0) return ''
+  return lower.slice(dot + 1)
+}
+
+async function parseImageFile(file, mediaTypeOverride) {
   if (file.size > MAX_IMAGE_BYTES) {
     throw createCodeError('IMAGE_TOO_LARGE', '图片简历不能超过 30MB，请压缩后重试')
   }
 
-  if (!ACCEPTED_IMAGE_TYPES.has(file.type)) {
+  const mediaType = mediaTypeOverride || file.type
+  if (!ACCEPTED_IMAGE_TYPES.has(mediaType)) {
     throw createCodeError('UNSUPPORTED_FILE_TYPE', '不支持该格式，请上传 PDF、PNG、JPG 或 WebP 文件')
   }
 
@@ -131,7 +146,7 @@ async function parseImageFile(file) {
     pages: [
       {
         base64: bytes.toString('base64'),
-        mediaType: file.type,
+        mediaType,
       },
     ],
   }
@@ -142,9 +157,25 @@ export async function parseResumeFile(file) {
     throw createCodeError('RESUME_CONTENT_EMPTY', '没有接收到简历文件，请重新上传')
   }
 
-  if (file.type === 'application/pdf') {
+  // wx.uploadFile 经常把文件 MIME 设成 application/octet-stream，
+  // 因此 file.type 不可信，必须叠加文件扩展名兜底。
+  const mime = String(file.type || '').toLowerCase()
+  const ext = getFileExtension(file.name)
+
+  const isPdf = mime === 'application/pdf' || ext === 'pdf'
+  if (isPdf) {
     return parsePdfFile(file)
   }
 
-  return parseImageFile(file)
+  // Image: prefer trustworthy MIME, otherwise derive from extension
+  let mediaType = mime.startsWith('image/') ? mime : ''
+  if (!mediaType && EXT_TO_IMAGE_MIME[ext]) {
+    mediaType = EXT_TO_IMAGE_MIME[ext]
+  }
+
+  if (!mediaType) {
+    throw createCodeError('UNSUPPORTED_FILE_TYPE', '不支持该格式，请上传 PDF、PNG、JPG 或 WebP 文件')
+  }
+
+  return parseImageFile(file, mediaType)
 }
