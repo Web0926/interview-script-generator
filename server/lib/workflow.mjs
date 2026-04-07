@@ -435,6 +435,11 @@ export async function prepareAnalysis({ sessionToken, clientId, resumeInput }) {
     session.resumeBase64 = null
     session.resumeMediaType = null
     session.lastError = null
+    // Clear stale results from any previous upload in this session
+    session.analysisResult = null
+    session.scriptsResult = null
+    session.status = 'active'
+    session.updatedAt = nowIso()
     updateCurrentStep(session, 'upload')
 
     return { ok: true }
