@@ -216,8 +216,40 @@ export async function startWxSession(token, clientId) {
     return { ok: false, code: 'INVALID_CLIENT_ID' }
   }
 
+  // If user has an existing active session, reset it to a fresh state
+  // (clicking "start" means user wants to begin a new run from scratch).
+  // This avoids burning a new session credit while clearing stale data.
   const existingResult = await findActiveWxSession(user.id, clientId)
-  if (existingResult) {
+  if (existingResult && existingResult.ok && existingResult.sessionToken) {
+    return withState(({ sessionsStore }) => {
+      const s = sessionsStore.sessions.find((x) => x.sessionToken === existingResult.sessionToken)
+      if (s) {
+        s.resumeInput = null
+        s.resumeBase64 = null
+        s.resumeMediaType = null
+        s.analysisResult = null
+        s.scriptsResult = null
+        s.lastError = null
+        s.status = 'active'
+        s.currentStep = 'upload'
+        s.clientId = clientId
+        s.updatedAt = nowIso()
+      }
+      return {
+        ok: true,
+        sessionToken: existingResult.sessionToken,
+        session: {
+          currentStep: 'upload',
+          sessionStatus: 'active',
+          analysisResult: null,
+          scriptsResult: null,
+          lastError: null,
+          expiresAt: s ? s.expiresAt : null,
+        },
+      }
+    })
+  }
+  if (existingResult && !existingResult.ok) {
     return existingResult
   }
 
